@@ -1,0 +1,16 @@
+# Python environment and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+
+# ESP-IDF generated configuration and build output
+**/build/
+**/sdkconfig
+**/sdkconfig.old
+**/managed_components/
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

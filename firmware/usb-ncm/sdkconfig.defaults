@@ -1,0 +1,6 @@
+CONFIG_TINYUSB_NET_MODE_NCM=y
+# ESP32-S3 USB-OTG TinyUSB and USB-Serial/JTAG share the internal PHY.
+# Keep the secondary USB-Serial/JTAG console disabled while NCM is active.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+# CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG is not set
+# CONFIG_USJ_ENABLE_USB_SERIAL_JTAG is not set
