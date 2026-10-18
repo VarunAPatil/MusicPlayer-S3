@@ -22,6 +22,7 @@ MODES = {
     "Wired video + bars (USB NCM)": "video",
     "Wired lyrics + bars (USB NCM)": "lyrics",
     "Wired bars only (USB NCM)": "wired-bars",
+    "Wired bars only (ESP32 DSP over USB NCM)": "esp-dsp",
     "Wireless bars only (Wi-Fi UDP)": "wireless-bars",
 }
 
@@ -134,6 +135,7 @@ class VisualizerGUI:
             "video": "USB NCM must be connected and the OLED video visible on the selected screen. The GUI starts the existing audio-spectrum and video transmitters together.",
             "lyrics": "USB NCM plus a browser exposing YouTube playback through MPRIS. Synced lyrics are looked up online; the spectrum sender is started by the existing lyrics script.",
             "wired-bars": "USB NCM sends only the eight audio bar heights to the MAX7219 matrix.",
+            "esp-dsp": "Flash firmware/usb-ncm-dsp first. USB NCM sends small mono PCM chunks; the ESP32 runs the FFT, eight-band analysis, normalization, and smoothing locally.",
             "wireless-bars": "Wi-Fi mode sends only the eight audio bar heights. Set ESP32 IP to the address printed by its firmware; this firmware does not drive the OLED.",
         }[kind]
         self.mode_help.configure(text=help_text)
@@ -203,6 +205,11 @@ class VisualizerGUI:
             return [command]
         if kind == "wired-bars":
             command = self._common("spectrum_transmitter.py", ip, port)
+            if self.debug.get():
+                command.append("--debug")
+            return [command]
+        if kind == "esp-dsp":
+            command = self._common("audio_pcm_streamer.py", ip, port)
             if self.debug.get():
                 command.append("--debug")
             return [command]

@@ -4,7 +4,7 @@ Turn a YouTube video playing on a Linux computer into a display for an ESP32-S3:
 
 - A 128×64 SSD1306 I²C OLED shows either a reduced copy of the visible video or timed lyrics.
 - An 8×8 MAX7219 matrix shows audio-reactive bars.
-- The computer captures the speaker output, analyzes it locally, and sends only eight bar heights. The ESP32 never receives or plays audio.
+- The computer captures speaker output. In the host-DSP mode it sends only eight bar heights; in the USB ESP-DSP mode it sends small mono PCM chunks and the ESP32 calculates the spectrum. The ESP32 never plays audio.
 - USB network (NCM) is the wired transport for OLED/video/lyrics modes. Wi-Fi UDP is available for the matrix-only spectrum mode.
 
 The project uses the existing display hardware. It needs no microphone, DAC, amplifier, or audio input circuit.
@@ -26,12 +26,14 @@ host/
   audio_volume.py                    optional pactl volume helper
   visualizer_gui.py                  Tkinter GUI for all host modes
   spectrum_transmitter.py            wired USB spectrum bars
+  audio_pcm_streamer.py              USB PCM stream for ESP32-side FFT
   wireless_spectrum_transmitter.py   Wi-Fi spectrum bars
   youtube_lyrics_transmitter.py      USB timed lyrics plus spectrum bars
   video_transmitter.py               USB screen capture for the OLED
   run_visualizer.sh                  starts USB video and bars together
 firmware/
   usb-ncm/                            USB NCM receiver, OLED, and MAX7219
+  usb-ncm-dsp/                        USB NCM receiver with ESP32-side FFT
   wifi-udp/                           Wi-Fi UDP MAX7219 receiver
 assets/
   demo.mp4                            original project demo
@@ -39,7 +41,7 @@ assets/
 requirements.txt
 ```
 
-Each firmware directory is a separate ESP-IDF project. Flash the project that matches the host script you plan to use. `usb-ncm` supports the wired spectrum, lyrics, and video modes. `wifi-udp` supports wireless spectrum bars on the MAX7219; it does not provide OLED video or lyrics.
+Each firmware directory is a separate ESP-IDF project. Flash the project that matches the host script you plan to use. `usb-ncm` is the original receiver for laptop-computed bars, lyrics, and video. `usb-ncm-dsp` is a separate copy that additionally accepts PCM packets and computes the spectrum on the ESP32. `wifi-udp` supports wireless spectrum bars on the MAX7219; it does not provide OLED video or lyrics.
 
 ## Hardware and pins
 
@@ -88,7 +90,7 @@ Install ESP-IDF 5.1 or newer with ESP32-S3 support by following [Espressif's Get
 source /path/to/esp-idf/export.sh
 ```
 
-The `usb-ncm` project downloads its ESP TinyUSB managed component on the first build. No Arduino display library is used; its OLED and MAX7219 drivers are part of the project. The Wi-Fi receiver uses ESP-IDF's built-in Wi-Fi and SPI drivers.
+The USB NCM projects download their ESP TinyUSB managed component on the first build. `usb-ncm-dsp` also downloads Espressif's managed `espressif/esp-dsp` component (`^1.8.2`) for its FFT implementation. No Arduino display library is used; the OLED and MAX7219 drivers are part of the projects. The Wi-Fi receiver uses ESP-IDF's built-in Wi-Fi and SPI drivers.
 
 ## Run the GUI (recommended)
 
@@ -98,7 +100,7 @@ Start the graphical launcher from the project root:
 .venv/bin/python host/visualizer_gui.py
 ```
 
-Choose one of four modes: wired video plus bars, wired lyrics plus bars, wired bars only, or wireless bars only. The GUI starts and stops the existing transmitter scripts; it does not reimplement their capture or packet logic. The wired modes require the `usb-ncm` firmware and connected USB network link. Wireless bars require the `wifi-udp` firmware and its current IP address.
+Choose a mode for wired video plus bars, wired lyrics plus bars, wired bars with host-side FFT, wired bars with ESP32-side FFT, or wireless bars. The GUI starts and stops the existing transmitter scripts; it does not reimplement their capture or packet logic. Video, lyrics, and host-FFT wired modes require `usb-ncm`; ESP32-FFT mode requires `usb-ncm-dsp`. Wireless bars require `wifi-udp` and its current IP address.
 
 ![MusicPlayer-S3 visualizer GUI](assets/visualizer-gui.png)
 
@@ -120,15 +122,16 @@ If the source dropdown is empty, check that `pactl` works in the same desktop se
 | Goal | Firmware to flash | GUI mode | CLI command |
 | --- | --- | --- |
 | Wireless sound bars on the matrix | `firmware/wifi-udp` | Wireless bars only | `.venv/bin/python host/wireless_spectrum_transmitter.py --ip ESP_WIFI_IP` |
-| Wired sound bars on the matrix | `firmware/usb-ncm` | Wired bars only | `.venv/bin/python host/spectrum_transmitter.py` |
+| Wired sound bars with laptop FFT | `firmware/usb-ncm` | Wired bars only | `.venv/bin/python host/spectrum_transmitter.py` |
+| Wired sound bars with ESP32 FFT | `firmware/usb-ncm-dsp` | Wired bars only (ESP32 DSP) | `.venv/bin/python host/audio_pcm_streamer.py` |
 | Wired timed YouTube lyrics on OLED plus sound bars | `firmware/usb-ncm` | Wired lyrics + bars | `.venv/bin/python host/youtube_lyrics_transmitter.py` |
 | Wired visible video on OLED plus sound bars | `firmware/usb-ncm` | Wired video + bars | `host/run_visualizer.sh` |
 
-Only one firmware image runs at a time. The `usb-ncm` firmware exposes its USB network interface and listens for all three wired packet types on UDP port 4210.
+Only one firmware image runs at a time. Both USB NCM builds expose the same USB network interface and use UDP port 4210. The original `usb-ncm` handles bar, video, and lyrics packets; `usb-ncm-dsp` handles those packets plus PCM audio for on-device DSP.
 
 ## Flash the firmware
 
-### USB NCM firmware (bars, lyrics, or video)
+### Original USB NCM firmware (host FFT, lyrics, or video)
 
 From the repository root, enter the firmware project directory. Connect the ESP32-S3's native USB port. Enter ROM download mode with BOOT held while tapping RESET/EN, then release BOOT. Build and flash:
 
@@ -160,6 +163,19 @@ ping -c 3 192.168.77.1
 USB NCM (Network Control Model) makes the ESP32-S3 appear to Linux as an Ethernet network adapter over the USB cable. The ESP-IDF firmware uses TinyUSB's NCM device support and assigns the ESP32 `192.168.77.1/30`; the host uses `192.168.77.2/30`. UDP is routed over that point-to-point network link. The cable carries network packets, not a serial text stream. The host sender binds UDP to the NCM interface (identified by its configured MAC address) so packets do not accidentally leave over Wi-Fi. The same USB connection is also used to flash in ROM download mode, but the running NCM app owns the data interface.
 
 The sender auto-detects the NCM interface by its MAC address. To select it manually, pass `--interface enx...` to the host program.
+
+### USB NCM DSP firmware (ESP32-side FFT)
+
+This firmware is a separate ESP-IDF project. Build and flash it when using `audio_pcm_streamer.py`; it leaves the original `usb-ncm` firmware source intact:
+
+```bash
+cd ~/MusicPlayer-S3/firmware/usb-ncm-dsp
+idf.py set-target esp32s3
+idf.py build
+idf.py -p YOUR_SERIAL_PORT flash
+```
+
+It uses the same GPIO assignments, USB NCM MAC/IP pair, OLED driver, and MAX7219 driver as the original wired firmware. Flashing one USB NCM build replaces the other firmware on the board; select the build that matches the host mode you want to run.
 
 ### Wi-Fi spectrum firmware
 
@@ -239,13 +255,30 @@ Change the address and optional port to match your network. Stop with Ctrl-C. Th
 
 ### Wired spectrum bars
 
-With `usb-ncm` flashed and the NCM link connected:
+With the original `usb-ncm` firmware flashed and the NCM link connected:
 
 ```bash
 .venv/bin/python host/spectrum_transmitter.py --debug
 ```
 
 The program captures the speaker monitor and sends roughly 50 small UDP packets per second. Use `--ip`, `--port`, `--source`, or `--interface` to override defaults.
+
+### Wired PCM stream with ESP32-side FFT
+
+This is a separate host program and leaves `spectrum_transmitter.py` unchanged. It captures the selected speaker-output monitor as 16 kHz mono signed 16-bit PCM and sends 256 samples per UDP packet over USB NCM. The packet is about 517 bytes and arrives about 62.5 times per second. The host does not run NumPy or calculate frequency bands in this mode.
+
+```bash
+.venv/bin/python host/audio_pcm_streamer.py --debug
+```
+
+Choose the active output monitor with `--source`, list sources with `--list-sources`, and optionally adjust the default speaker volume with `--volume 120`. For example:
+
+```bash
+.venv/bin/python host/audio_pcm_streamer.py \
+  --source '@DEFAULT_MONITOR@' --volume 120 --debug
+```
+
+The ESP32 `usb-ncm-dsp` firmware receives each PCM packet, applies an overlapping 1024-sample Hann window, and calls ESP-DSP's `dsps_fft2r_fc32()` and `dsps_bit_rev_fc32()` APIs. It combines eight logarithmically spaced bands from 40 Hz to 7.5 kHz, applies adaptive level normalization and 25 ms attack / 100 ms decay smoothing, then updates the MAX7219. Since the sample rate is 16 kHz, the analyzed spectrum is limited to the 8 kHz Nyquist frequency. Existing CSV bar packets and the video/lyrics packets remain supported by that separate receiver.
 
 ### Wired lyrics and bars
 
@@ -298,6 +331,8 @@ Audio bars update at about 50 Hz; video frames default to 20 Hz. Both travel ove
 5. A slow automatic level reference follows overall peaks. Band amplitudes are expressed relative to that reference in decibels, then mapped to a 0–8 target with configurable dynamic range and headroom. This helps songs with different mastering levels use the display, while silence remains zero.
 6. Separate attack and decay smoothing make rising bars respond quickly and falling bars settle more gradually. The resulting eight integer heights are sent as a short ASCII CSV datagram. On the matrix firmware, `CENTER_MIRROR` pairs the lower and upper bands to create the inward/outward mirrored layout.
 
+This description applies to `spectrum_transmitter.py`, where the laptop runs NumPy's FFT and `usb-ncm` receives the heights. `audio_pcm_streamer.py` is the alternate path: the laptop only captures and packetizes PCM, while `usb-ncm-dsp/main/audio_dsp.c` performs the FFT, band mapping, AGC, and smoothing on the ESP32.
+
 The tuning values (`FFT_SIZE`, `UPDATE_RATE`, `ATTACK`, `DECAY`, `DYNAMIC_RANGE_DB`, `HEADROOM_DB`, gains, and frequency limits) are near the top of `host/spectrum_transmitter.py`.
 
 ## Packet formats
@@ -305,16 +340,17 @@ The tuning values (`FFT_SIZE`, `UPDATE_RATE`, `ATTACK`, `DECAY`, `DYNAMIC_RANGE_
 All receivers use UDP port 4210 by default:
 
 - Bars: eight comma-separated decimal values, each clamped to 0–8, for example `7,4,2,6,8,5,3,1`.
+- PCM audio: a 517-byte UDP datagram. Byte 0 is ASCII `A` (`0x41`); bytes 1–4 are the 32-bit unsigned packet sequence in network (big-endian) byte order; bytes 5–516 contain 256 signed 16-bit mono PCM samples in little-endian order (`s16le`). At 16 kHz, each packet represents 16 ms of audio and the sender produces 62.5 packets/s. This is the on-device DSP input format.
 - Video: `V`, a 32-bit network-order frame sequence, then 1024 bytes of packed SSD1306 page pixels.
 - Lyrics: `L`, one-byte title length, one-byte line length, then ASCII title and lyric bytes.
 
-The C `display_message_t` in `firmware/usb-ncm/main/main.c` is an internal firmware queue object, not the on-wire packet layout. Its `type` enum says whether the union contains a video frame or lyrics. A `union` overlays those alternatives in memory, so it reserves room for the larger video payload instead of allocating space for video and lyrics simultaneously. The video member has a frame sequence and 1024 packed OLED bytes; the lyrics member has two bounded, NUL-terminated character arrays. The receiver validates each packet, parses it into this struct, and overwrites a one-message FreeRTOS queue so the OLED task handles the newest display update. Do not serialize or transmit the struct bytes directly: compiler padding, enum representation, and byte order are not the defined wire protocol.
+The C `display_message_t` in each wired firmware's `main.c` is an internal firmware queue object, not the on-wire packet layout. Its `type` enum says whether the union contains a video frame or lyrics. A `union` overlays those alternatives in memory, so it reserves room for the larger video payload instead of allocating space for video and lyrics simultaneously. The video member has a frame sequence and 1024 packed OLED bytes; the lyrics member has two bounded, NUL-terminated character arrays. The receiver validates each packet, parses it into this struct, and overwrites a one-message FreeRTOS queue so the OLED task handles the newest display update. Do not serialize or transmit the struct bytes directly: compiler padding, enum representation, and byte order are not the defined wire protocol.
 
 The ESP32's USB receiver rejects malformed packets. Each datagram replaces the latest display state, so a lost UDP packet does not stall the display. If bar packets stop, the matrix decays toward zero.
 
 ### Matrix layout and orientation macros
 
-Both `firmware/usb-ncm/main/main.c` and `firmware/wifi-udp/main/main.c` define the matrix layout near the pin definitions. Rebuild and reflash the matching firmware after changing them:
+`firmware/usb-ncm/main/main.c`, `firmware/usb-ncm-dsp/main/main.c`, and `firmware/wifi-udp/main/main.c` define the matrix layout near the pin definitions. Rebuild and reflash the matching firmware after changing them:
 
 - `CENTER_MIRROR 1` groups adjacent bands and mirrors each group across the center. The bass pair appears in the two center columns, then progressively higher groups move outward; set it to `0` to keep the eight input bands in direct left-to-right order.
 - `MATRIX_ROTATION` accepts `0`, `90`, `180`, or `270` degrees clockwise.
